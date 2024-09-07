@@ -29,6 +29,10 @@ $ ./install.sh
 
 インストール中に MQTT の ID, パスワードを聞かれるので入力すると `~/.2jciebl_bu_ble_mqtt` に保存されます。
 
+### util/generate_ha_conf.py
+`-a` オプションに与えるカンマ区切りのアドレスから Home Assistant 用の設定 yaml 断片を出力するだけのユーティリティです。2JCIE-BL 用のものしか用意していません。
+
 ## 注意
-- Raspberry Pi 5 + Raspberry Pi OS でしか動作確認してないです。
+- Raspberry Pi 5 + Raspberry Pi OS + 2JCIE-BL でしか動作確認してないです。
+  - 2JCIE-BU は持ってないのでよくわからないです
 - このコードはだいたい chatgpt が書いてます。
