@@ -130,6 +130,52 @@ def print_bl(packet, client, base_topic, address):
     
     logger.info(f"Published 2JCIE-BL data to MQTT topic {base_topic}/{address.replace(':', '_')}: {payload}")
 
+
+def print_bl_beacon(packet, client, base_topic, address):
+    """Parse and publish data from 2JCIE-BL in Beacon mode.
+
+    The Beacon mode frame contains a reduced set of measurements compared
+    to the normal "EP" frame.  The layout (after the manufacturer specific
+    header) is assumed to be:
+
+    * Sequence number:    1 byte
+    * Temperature:        2 bytes, 0.01 °C units, little endian
+    * Humidity:           2 bytes, 0.01 %RH units, little endian
+    * Ambient light:      2 bytes, 1 lx units, little endian
+    * Barometric pressure:2 bytes, 0.1 hPa units, little endian
+    * Battery voltage:    1 byte, 10 mV units
+
+    These offsets are based on the communication interface manual for the
+    2JCIE-BL01.  Values are converted into human readable units before being
+    published to MQTT.
+    """
+
+    company_id = format(packet[19], "x") + format(packet[20], "x").zfill(2)
+    sequence_number = int(packet[21])
+    temperature = int.from_bytes(packet[22:24], byteorder="little") / 100
+    relative_humidity = int.from_bytes(packet[24:26], byteorder="little") / 100
+    ambient_light = int.from_bytes(packet[26:28], byteorder="little")
+    pressure = int.from_bytes(packet[28:30], byteorder="little") / 10
+    battery_voltage = packet[30] * 10
+
+    data = {
+        "time": int(time.time()),
+        "company_id": company_id,
+        "sequence_number": sequence_number,
+        "temperature": temperature,
+        "relative_humidity": relative_humidity,
+        "ambient_light": ambient_light,
+        "pressure": pressure,
+        "battery_voltage": battery_voltage,
+    }
+
+    payload = json.dumps(data)
+    publish_mqtt(client, base_topic, address, payload)
+
+    logger.info(
+        f"Published 2JCIE-BL Beacon data to MQTT topic {base_topic}/{address.replace(':', '_')}: {payload}"
+    )
+
 def parse_events(sock, address, client, base_topic):
     old_filter = sock.getsockopt(bluez.SOL_HCI, bluez.HCI_FILTER, 14)
     flt = bluez.hci_filter_new()
@@ -150,6 +196,8 @@ def parse_events(sock, address, client, base_topic):
                     print_bl(packet_bin, client, base_topic, addr)
                 if b'Rbt' in packet_bin:
                     print_bu(packet_bin, client, base_topic, addr)
+                if b'BP' in packet_bin:
+                    print_bl_beacon(packet_bin, client, base_topic, addr)
 
 def hci_le_parse_response_packet(pkt):
     result = {}
