@@ -74,14 +74,14 @@ def publish_mqtt(client, base_topic, address, payload):
     client.publish(topic, payload)
 
 def print_bu(packet, client, base_topic, address):
-    company_id = str(format(packet[19],'x')+format(packet[20],'x').zfill(2))
-    temperature = str(int(hex(packet[24])+format(packet[23],'x'), 16)/100)
-    relative_humidity = str(int(hex(packet[26])+format(packet[25],'x'),16)/100)
-    ambient_light = str(int(hex(packet[28])+format(packet[27],'x'),16))
-    barometric_pressure = str(int(hex(packet[32])+format(packet[31],'x')+format(packet[30],'x')+format(packet[29],'x'),16)/1000)
-    sound_noise = str(int(hex(packet[34])+format(packet[33],'x'),16)/100)
-    etvoc = str(int(hex(packet[36])+format(packet[35],'x'),16))
-    eco2 = str(int(hex(packet[38])+format(packet[37],'x'),16))
+    company_id = packet[19:21].hex()
+    temperature = struct.unpack_from("<h", packet, 23)[0] / 100
+    relative_humidity = struct.unpack_from("<H", packet, 25)[0] / 100
+    ambient_light = struct.unpack_from("<H", packet, 27)[0]
+    barometric_pressure = struct.unpack_from("<I", packet, 29)[0] / 1000
+    sound_noise = struct.unpack_from("<H", packet, 33)[0] / 100
+    etvoc = struct.unpack_from("<H", packet, 35)[0]
+    eco2 = struct.unpack_from("<H", packet, 37)[0]
     
     data = {
         "time": int(time.time()),
@@ -102,16 +102,16 @@ def print_bu(packet, client, base_topic, address):
     logger.info(f"Published 2JCIE-BU data to MQTT topic {base_topic}/{address.replace(':', '_')}: " + payload)
 
 def print_bl(packet, client, base_topic, address):
-    company_id = format(packet[19], 'x') + format(packet[20], 'x').zfill(2)
-    sequence_number = int(hex(packet[21]), 16)
-    temperature = int(hex(packet[23]) + format(packet[22], 'x'), 16) / 100
-    relative_humidity = int(hex(packet[25]) + format(packet[24], 'x'), 16) / 100
-    ambient_light = int(hex(packet[27]) + format(packet[26], 'x'), 16)
-    uv_index = int(hex(packet[29]) + format(packet[28], 'x'), 16) / 100
-    pressure = int(hex(packet[31]) + format(packet[30], 'x'), 16) / 10
-    sound_noise = int(hex(packet[33]) + format(packet[32], 'x'), 16) / 100
-    discomfort_index = int(hex(packet[35]) + format(packet[34], 'x'), 16) / 100
-    heat_stroke = int(hex(packet[37]) + format(packet[36], 'x'), 16) / 100
+    company_id = packet[19:21].hex()
+    sequence_number = packet[21]
+    temperature = struct.unpack_from("<h", packet, 22)[0] / 100
+    relative_humidity = struct.unpack_from("<H", packet, 24)[0] / 100
+    ambient_light = struct.unpack_from("<H", packet, 26)[0]
+    uv_index = struct.unpack_from("<H", packet, 28)[0] / 100
+    pressure = struct.unpack_from("<H", packet, 30)[0] / 10
+    sound_noise = struct.unpack_from("<H", packet, 32)[0] / 100
+    discomfort_index = struct.unpack_from("<h", packet, 34)[0] / 100
+    heat_stroke = struct.unpack_from("<h", packet, 36)[0] / 100
     # Sensor ADV 2 encodes battery voltage as (raw + 100) * 10 mV.
     battery_voltage = (packet[40] + 100) * 10
 
