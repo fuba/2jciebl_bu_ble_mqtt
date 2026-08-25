@@ -6,7 +6,6 @@ import logging
 import argparse
 import paho.mqtt.client as mqtt
 import os
-import threading
 import time
 import json
 
@@ -45,8 +44,12 @@ def reset_hci():
         logger.error(f"Failed to reset Bluetooth device: {str(e)}")
         sys.exit(1)
 
-def hci_le_set_scan_parameters(sock):
-    cmd_pkt = struct.pack("<BBBBBBB", 0x01, 0x0, 0x10, 0x0, 0x10, 0x01, 0x00)
+def hci_le_set_scan_parameters(sock, active=False):
+    # Sensor ADV 2 contains all measurements in ADV_IND, so a passive scan is
+    # sufficient.  Avoiding scan requests also avoids needless radio work on a
+    # battery-powered 2JCIE-BL.
+    scan_type = 0x01 if active else 0x00
+    cmd_pkt = struct.pack("<BBBBBBB", scan_type, 0x0, 0x10, 0x0, 0x10, 0x01, 0x00)
     bluez.hci_send_cmd(sock, OGF_LE_CTL, OCF_BLE_SET_SCAN_PARAMETERS, cmd_pkt)
 
 def hci_le_enable_scan(sock):
@@ -89,7 +92,8 @@ def print_bu(packet, client, base_topic, address):
         "barometric_pressure": barometric_pressure,
         "sound_noise": sound_noise,
         "etvoc": etvoc,
-        "eco2": eco2
+        "eco2": eco2,
+        "address": address
     }
     
     payload = json.dumps(data)
@@ -108,7 +112,8 @@ def print_bl(packet, client, base_topic, address):
     sound_noise = int(hex(packet[33]) + format(packet[32], 'x'), 16) / 100
     discomfort_index = int(hex(packet[35]) + format(packet[34], 'x'), 16) / 100
     heat_stroke = int(hex(packet[37]) + format(packet[36], 'x'), 16) / 100
-    battery_voltage = int(hex(packet[40]), 16)
+    # Sensor ADV 2 encodes battery voltage as (raw + 100) * 10 mV.
+    battery_voltage = (packet[40] + 100) * 10
 
     data = {
         "time": int(time.time()),
@@ -122,7 +127,8 @@ def print_bl(packet, client, base_topic, address):
         "sound_noise": sound_noise,
         "discomfort_index": discomfort_index,
         "heat_stroke": heat_stroke,
-        "battery_voltage": battery_voltage
+        "battery_voltage": battery_voltage,
+        "address": address
     }
 
     payload = json.dumps(data)
@@ -130,7 +136,8 @@ def print_bl(packet, client, base_topic, address):
     
     logger.info(f"Published 2JCIE-BL data to MQTT topic {base_topic}/{address.replace(':', '_')}: {payload}")
 
-def parse_events(sock, address, client, base_topic):
+def parse_events(sock, addresses, client, base_topic):
+    target_addresses = {address.lower() for address in addresses}
     old_filter = sock.getsockopt(bluez.SOL_HCI, bluez.HCI_FILTER, 14)
     flt = bluez.hci_filter_new()
     bluez.hci_filter_all_events(flt)
@@ -143,8 +150,8 @@ def parse_events(sock, address, client, base_topic):
         packet_bin = parsed_packet["packet_bin"]
         addr = ':'.join('%02x' % b for b in packet_bin[7:13][::-1])
 
-        if addr.lower() == address.lower():
-            logger.info(f"Received packet from {address}")
+        if addr.lower() in target_addresses:
+            logger.info(f"Received packet from {addr}")
             if b'\xd5\x02' in packet_bin:
                 if b'EP' in packet_bin:
                     print_bl(packet_bin, client, base_topic, addr)
@@ -161,7 +168,8 @@ def hci_le_parse_response_packet(pkt):
     result["packet_bin"] = pkt
     return result
 
-def process_ble_device(address, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, base_topic):
+def process_ble_devices(addresses, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, base_topic, active_scan=False):
+    sock = None
     try:
         # Reset the Bluetooth device to ensure it's ready
         reset_hci()
@@ -170,19 +178,21 @@ def process_ble_device(address, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, base
         sock = bluez.hci_open_dev(BT_DEV_ID)
 
         # Set BLE scan parameters and enable scan
-        hci_le_set_scan_parameters(sock)
+        hci_le_set_scan_parameters(sock, active=active_scan)
         hci_le_enable_scan(sock)
 
         client = mqtt_connect(mqtt_host, mqtt_port, mqtt_user, mqtt_pass)
-        logger.info(f"Listening for device {address}")
+        logger.info("Listening for devices: %s", ", ".join(addresses))
 
-        parse_events(sock, address, client, base_topic)
+        parse_events(sock, addresses, client, base_topic)
 
     except Exception as e:
-        logger.error(f"Exception for device {address}: {str(e)}")
+        logger.error(f"BLE scanner exception: {str(e)}")
 
     finally:
-        hci_le_disable_scan(sock)
+        if sock is not None:
+            hci_le_disable_scan(sock)
+            sock.close()
 
 def main():
     parser = argparse.ArgumentParser(description='Connect to multiple BLE devices and send data to MQTT.')
@@ -192,6 +202,11 @@ def main():
     parser.add_argument('-u', '--mqtt_user', default=MQTT_USER, help='MQTT username')
     parser.add_argument('-P', '--mqtt_pass', default=MQTT_PASS, help='MQTT password')
     parser.add_argument('-t', '--mqtt_topic', default=MQTT_BASE_TOPIC, help='Base MQTT topic')
+    parser.add_argument(
+        '--active-scan',
+        action='store_true',
+        help='Use active BLE scanning. Passive scanning is sufficient and recommended for 2JCIE-BL.',
+    )
     args = parser.parse_args()
 
     addresses = [addr.strip() for addr in args.addresses.split(',')]
@@ -201,16 +216,17 @@ def main():
     mqtt_pass = args.mqtt_pass
     mqtt_base_topic = args.mqtt_topic
 
-    # Create a thread for each BLE device
-    threads = []
-    for address in addresses:
-        thread = threading.Thread(target=process_ble_device, args=(address, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, mqtt_base_topic))
-        threads.append(thread)
-        thread.start()
-
-    # Wait for all threads to complete
-    for thread in threads:
-        thread.join()
+    # One HCI scanner can receive advertisements from every target.  Opening and
+    # resetting the same adapter once per address is racy and unnecessary.
+    process_ble_devices(
+        addresses,
+        mqtt_host,
+        mqtt_port,
+        mqtt_user,
+        mqtt_pass,
+        mqtt_base_topic,
+        active_scan=args.active_scan,
+    )
 
 if __name__ == "__main__":
     main()
