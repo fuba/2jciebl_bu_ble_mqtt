@@ -8,6 +8,7 @@ import paho.mqtt.client as mqtt
 import os
 import time
 import json
+import threading
 
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger('2jcie_ble_mqtt')
@@ -15,6 +16,7 @@ logger.setLevel(logging.DEBUG)
 handler = logging.StreamHandler()
 handler.setFormatter(logging.Formatter('%(asctime)s:%(levelname)s:%(name)s: %(message)s'))
 logger.addHandler(handler)
+logger.propagate = False
 
 # Bluetooth adaptor
 BT_DEV_ID = 0
@@ -61,17 +63,59 @@ def hci_le_disable_scan(sock):
     bluez.hci_send_cmd(sock, OGF_LE_CTL, OCF_BLE_SET_SCAN_ENABLE, cmd_pkt)
 
 def mqtt_connect(mqtt_host, mqtt_port, mqtt_user, mqtt_pass):
+    connection_finished = threading.Event()
+    connection_result = [None]
+
+    def on_connect(client, userdata, flags, rc):
+        connection_result[0] = rc
+        connection_finished.set()
+        if rc == 0:
+            logger.info("Connected to MQTT broker at %s:%s", mqtt_host, mqtt_port)
+        else:
+            logger.error("MQTT broker rejected connection (result code %s)", rc)
+
+    def on_disconnect(client, userdata, rc):
+        if rc != 0:
+            logger.warning(
+                "Unexpected MQTT disconnection (result code %s); reconnecting",
+                rc,
+            )
+
     client = mqtt.Client()
+    client.on_connect = on_connect
+    client.on_disconnect = on_disconnect
+    client.reconnect_delay_set(min_delay=1, max_delay=30)
     if mqtt_user and mqtt_pass:
         client.username_pw_set(mqtt_user, mqtt_pass)
+
     client.connect(mqtt_host, mqtt_port, 60)
+    client.loop_start()
+
+    if not connection_finished.wait(timeout=10):
+        client.loop_stop()
+        client.disconnect()
+        raise TimeoutError("Timed out waiting for MQTT connection")
+    if connection_result[0] != 0:
+        client.loop_stop()
+        client.disconnect()
+        raise ConnectionError(
+            f"MQTT broker rejected connection (result code {connection_result[0]})"
+        )
+
     return client
 
 # Function to publish data to MQTT with modified topic
 def publish_mqtt(client, base_topic, address, payload):
     modified_address = address.replace(":", "_")
     topic = f"{base_topic}/{modified_address}"
-    client.publish(topic, payload)
+    message = client.publish(topic, payload, qos=1, retain=True)
+    if message.rc != mqtt.MQTT_ERR_SUCCESS:
+        raise ConnectionError(
+            f"Failed to queue MQTT message for {topic} (result code {message.rc})"
+        )
+    message.wait_for_publish(timeout=10)
+    if not message.is_published():
+        raise TimeoutError(f"Timed out publishing MQTT message to {topic}")
 
 def print_bu(packet, client, base_topic, address):
     company_id = packet[19:21].hex()
@@ -170,6 +214,7 @@ def hci_le_parse_response_packet(pkt):
 
 def process_ble_devices(addresses, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, base_topic, active_scan=False):
     sock = None
+    client = None
     try:
         # Reset the Bluetooth device to ensure it's ready
         reset_hci()
@@ -190,6 +235,9 @@ def process_ble_devices(addresses, mqtt_host, mqtt_port, mqtt_user, mqtt_pass, b
         logger.error(f"BLE scanner exception: {str(e)}")
 
     finally:
+        if client is not None:
+            client.disconnect()
+            client.loop_stop()
         if sock is not None:
             hci_le_disable_scan(sock)
             sock.close()
